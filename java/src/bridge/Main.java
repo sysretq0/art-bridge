@@ -1,5 +1,6 @@
 package bridge;
 
+import android.os.Build;
 import android.os.Looper;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -51,6 +52,30 @@ public final class Main {
             // Already prepared; ignore.
         }
 
+        // 3. Shizuku-style startup hygiene: nice process name + never die on a
+        // stray Binder-thread exception. All reflective so host JVM tests and
+        // every API level succeed.
+        try {
+            Class<?> processClass = Class.forName("android.os.Process");
+            try {
+                Method setArgV0 = processClass.getDeclaredMethod("setArgV0", String.class);
+                setArgV0.setAccessible(true);
+                setArgV0.invoke(null, "art_bridge");
+            } catch (Throwable ignored) {
+            }
+            try {
+                Class<?> ddmClass = Class.forName("android.ddm.DdmHandleAppName");
+                Method setAppName = ddmClass.getDeclaredMethod("setAppName", String.class, int.class);
+                setAppName.setAccessible(true);
+                setAppName.invoke(null, "art_bridge", 0);
+            } catch (Throwable ignored) {
+            }
+        } catch (Throwable ignored) {
+        }
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+            System.err.println("[art-bridge] Uncaught exception on " + thread.getName() + ": " + error);
+        });
+
         String socketName = DEFAULT_SOCKET_NAME;
         boolean connectMode = false;
 
@@ -94,6 +119,11 @@ public final class Main {
      * Unlock Android Hidden APIs by setting exempt prefixes to "L" (matches all classes).
      */
     private static void unlockHiddenApis() {
+        // setHiddenApiExemptions exists only on API 28+; guard so API 26-27
+        // devices do not throw NoSuchMethodError.
+        if (Build.VERSION.SDK_INT < 28) {
+            return;
+        }
         try {
             // Direct call against dalvik.system.VMRuntime
             VMRuntime.getRuntime().setHiddenApiExemptions(new String[]{"L"});
@@ -153,7 +183,7 @@ public final class Main {
                 try {
                     while (running) {
                         try {
-                            clientFd = Os.accept(serverFd, null);
+                            clientFd = Os.accept(serverFd, (java.net.InetSocketAddress) null);
                             break;
                         } catch (ErrnoException e) {
                             if (e.errno == OsConstants.EINTR) {

@@ -2,6 +2,7 @@ package android.system;
 
 import java.io.FileDescriptor;
 import java.io.InterruptedIOException;
+import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.SocketException;
 import java.nio.ByteBuffer;
@@ -22,7 +23,9 @@ public final class Os {
     public static void listen(FileDescriptor fd, int backlog) throws ErrnoException {
     }
 
-    public static FileDescriptor accept(FileDescriptor fd, SocketAddress peerAddress) throws ErrnoException, SocketException {
+    // API 26-28 signature (SocketAddress overload was added in API 29);
+    // callers must pass (InetSocketAddress) null so the DEX links on all API levels.
+    public static FileDescriptor accept(FileDescriptor fd, InetSocketAddress peerAddress) throws ErrnoException, SocketException {
         return null;
     }
 

@@ -100,6 +100,10 @@ public final class Parcel {
         }
     }
 
+    public void writeNoException() {
+        writeInt(0);
+    }
+
     public byte[] createByteArray() {
         return marshall();
     }

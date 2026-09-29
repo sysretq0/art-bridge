@@ -1,6 +1,7 @@
 package bridge;
 
 import android.os.Binder;
+import android.os.IBinder;
 import android.os.Parcel;
 import android.os.RemoteException;
 
@@ -137,6 +138,9 @@ public final class CallbackRegistry {
      * Dynamic Binder stub implementing onTransact for raw Binder callbacks.
      */
     public static class DynamicBinderStub extends Binder {
+        // Standard Android Binder contract code for querying the interface descriptor.
+        private static final int INTERFACE_TRANSACTION = 0x5f4e5446;
+
         private final int callbackId;
 
         public DynamicBinderStub(int callbackId, String descriptor) {
@@ -146,6 +150,14 @@ public final class CallbackRegistry {
 
         @Override
         protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+            // dumpsys / system_server expect the descriptor here.
+            if (code == INTERFACE_TRANSACTION) {
+                if (reply != null) {
+                    reply.writeString(getInterfaceDescriptor());
+                }
+                return true;
+            }
+
             ArgValue[] args;
             if (data != null) {
                 byte[] raw = data.marshall();
@@ -161,6 +173,10 @@ public final class CallbackRegistry {
                 } catch (Throwable t) {
                     System.err.println("[art-bridge] Failed to dispatch Binder onTransact callback: " + t.getMessage());
                 }
+            }
+            // Two-way calls must carry the no-exception header or the caller blocks/fails.
+            if (reply != null && (flags & IBinder.FLAG_ONEWAY) == 0) {
+                reply.writeNoException();
             }
             return true;
         }
