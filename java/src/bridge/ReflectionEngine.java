@@ -51,7 +51,7 @@ public final class ReflectionEngine {
 
         try {
             Object result = method.invoke(proxy, params);
-            return ArgValue.fromJavaObject(result);
+            return wrapServiceResult(result);
         } catch (Throwable t) {
             if (isDeadObject(t)) {
                 // Invalidate service cache & proxy cache, then retry once
@@ -65,13 +65,35 @@ public final class ReflectionEngine {
                 method = resolveMethod(proxy.getClass(), methodName, args, false);
                 method.setAccessible(true);
                 Object result = method.invoke(proxy, params);
-                return ArgValue.fromJavaObject(result);
+                return wrapServiceResult(result);
             }
             if (t instanceof Exception) {
                 throw (Exception) t;
             }
             throw new RuntimeException(t);
         }
+    }
+
+    private static ArgValue wrapServiceResult(Object result) {
+        if (result instanceof java.util.Collection) {
+            java.util.Collection<?> col = (java.util.Collection<?>) result;
+            boolean allStrings = true;
+            for (Object item : col) {
+                if (item != null && !(item instanceof CharSequence)) {
+                    allStrings = false;
+                    break;
+                }
+            }
+            if (allStrings) {
+                String[] arr = new String[col.size()];
+                int idx = 0;
+                for (Object item : col) {
+                    arr[idx++] = item == null ? "" : String.valueOf(item);
+                }
+                return ArgValue.ofStrArray(arr);
+            }
+        }
+        return ArgValue.fromJavaObject(result);
     }
 
     /**
