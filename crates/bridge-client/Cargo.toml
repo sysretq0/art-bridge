@@ -1,0 +1,10 @@
+[package]
+name = "bridge-client"
+version = "0.1.0"
+edition = "2021"
+description = "Native SOCK_SEQPACKET IPC client for art-bridge app_process worker"
+license = "GPL-3.0"
+
+[dependencies]
+bridge-proto = { path = "../bridge-proto" }
+libc = "0.2"

@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/bridge-proto",
+    "crates/bridge-client",
+]
+resolver = "2"

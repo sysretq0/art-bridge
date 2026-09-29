@@ -1,0 +1,13 @@
+# Rust target directory
+/target/
+
+# Java build output
+/java/build/
+
+# Temporary and editor files
+*.swp
+*.swo
+*~
+*.bak
+*.log
+.DS_Store

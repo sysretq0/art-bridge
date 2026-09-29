@@ -1,0 +1,8 @@
+[package]
+name = "bridge-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-dependency Little-Endian binary protocol for art-bridge app_process worker"
+license = "GPL-3.0"
+
+[dependencies]
