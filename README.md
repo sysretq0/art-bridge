@@ -159,13 +159,36 @@ Incoming frames are distinguished by an initial `msg_type: u8` byte:
 2. **Abstract Socket Namespace (`\0art_bridge`)**:
    Avoids filesystem permission issues and leaves no stale socket files on disk.
 3. **Peer Credential Authentication (`SO_PEERCRED`)**:
-   Inspects caller UID at connection acceptance, allowing only identical UID, root (`0`), or Android shell (`2000`).
+   Inspects caller UID at connection acceptance, allowing only the identical UID unless an explicit `--allow-uid` exception was passed. No implicit root/shell bypass. The Rust client also verifies the server UID after `connect()`.
 4. **Packet Truncation Detection (`MSG_TRUNC`)**:
    The native Rust client passes `libc::MSG_TRUNC` to `recv(2)`. If a response exceeds 64 KB, the client safely errors with `ClientError::PacketTruncated` rather than panicking on truncated deserialization.
 5. **Thread-Safe Socket Multiplexing**:
    Android Binder callbacks execute on arbitrary Binder threadpool threads (`binder:XXXX_X`). Both `Main.java` and `EchoDispatcher.java` guard socket writes (`writeResponse` and `sendCallbackEvent`) with synchronized locks, ensuring atomic packet delivery without interleaving.
 6. **Dead Binder Recovery**:
    `BinderCache` checks `binder.isBinderAlive()` and catches `DeadObjectException`, automatically invalidating stale caches and re-resolving services once from `ServiceManager`.
+7. **API 26–36+ Compatibility**:
+   The `Os.accept` stub declares the API 26–28 `accept(FileDescriptor, InetSocketAddress)` signature and `Main.java` passes `(InetSocketAddress) null`, so one DEX links on every version; `setHiddenApiExemptions` is guarded by `SDK_INT >= 28`; DEX is built with `d8 --min-api 26`.
+
+---
+
+## Shizuku Credit & Adopted Runtime Patterns
+
+`app_process` startup, Binder, and `Parcel` hygiene follow [Shizuku](https://github.com/RikkaApps/Shizuku) (`rikka.shizuku.server.ShizukuService`, Apache-2.0). Verified against upstream `master` before copying. Adopted:
+
+| Shizuku pattern | art-bridge equivalent |
+|---|---|
+| `DdmHandleAppName.setAppName("shizuku_server", 0)` first in `main()` | `Process.setArgV0("art_bridge")` + `DdmHandleAppName.setAppName("art_bridge", 0)` reflectively in `Main.main()` (verified: `/proc/<pid>/cmdline` shows `art_bridge`) |
+| `Looper.prepareMainLooper()` before service init | Same in `Main.main()` (SDK-independent; `Looper` stub ships `prepareMainLooper`/`getMainLooper`) |
+| `onTransact`: `data.enforceInterface(DESCRIPTOR)` + `reply.writeNoException()` | `DynamicBinderStub.onTransact` answers `INTERFACE_TRANSACTION (0x5f4e5446)` with the descriptor and writes `writeNoException()` on two-way calls |
+| `Parcel` hygiene (`recycle()` callers, no native leaks) | `rawBinderTransact` recycles both `Parcel`s in `try/finally` with one `DeadObjectException` retry |
+| Per-call `Binder.getCallingUid/Pid` permission checks | Socket-transport equivalent: strict `SO_PEERCRED` UID match on accept + client-side peer verify (item 3 above) |
+
+Deliberately **not** copied, with reasons:
+- `HiddenApiBypass` library: our direct `VMRuntime.setHiddenApiExemptions({"L"})` + reflection fallback + `SDK_INT` guard covers the same ground; a third-party dep is unjustified for one call.
+- Blocking `waitSystemService()` at startup: our daemon starts on demand, so per-request lookup with `isBinderAlive` eviction + one retry is equivalent without stalling typo'd service names.
+- Proactive `linkToDeath` on cached binders: same effect achieved via `isBinderAlive` pre-check + `DeadObjectException` retry; add only if a stale-binder race is ever observed.
+- `data.enforceInterface()` on callback ingress: Shizuku enforces a security boundary; our stub is a generic outbound-only event sink already gated by `SO_PEERCRED`, so strict enforcement would only add failure modes.
+- `Looper.loop()` on main: Shizuku pumps the main queue; our main thread runs the socket serve loop, so main-queue-posted work is a known limitation — hidden APIs requiring main-thread dispatch may stall. Moving the serve loop off-main is the upgrade path if ever hit.
 
 ---
 
