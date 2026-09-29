@@ -283,15 +283,18 @@ public final class ReflectionEngine {
             return cached;
         }
 
-        // First pass: exact parameter matches across public + declared.
+        // First pass: best-scoring parameter match across public + declared.
+        Method best = null;
+        int bestScore = Integer.MAX_VALUE;
         for (Method m : clazz.getMethods()) {
             if (m.getName().equals(methodName) && m.getParameterCount() == args.length) {
                 if (isStatic && !Modifier.isStatic(m.getModifiers())) {
                     continue;
                 }
-                if (parametersMatch(m.getParameterTypes(), args)) {
-                    putMethodCache(cacheKey, m);
-                    return m;
+                int score = matchScore(m.getParameterTypes(), args);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = m;
                 }
             }
         }
@@ -300,11 +303,16 @@ public final class ReflectionEngine {
                 if (isStatic && !Modifier.isStatic(m.getModifiers())) {
                     continue;
                 }
-                if (parametersMatch(m.getParameterTypes(), args)) {
-                    putMethodCache(cacheKey, m);
-                    return m;
+                int score = matchScore(m.getParameterTypes(), args);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = m;
                 }
             }
+        }
+        if (best != null) {
+            putMethodCache(cacheKey, best);
+            return best;
         }
 
         // Fallback: first arity-only match, uncached.
@@ -343,15 +351,28 @@ public final class ReflectionEngine {
     }
 
     private static Constructor<?> resolveConstructor(Class<?> clazz, ArgValue[] args) throws NoSuchMethodException {
+        Constructor<?> best = null;
+        int bestScore = Integer.MAX_VALUE;
         for (Constructor<?> c : clazz.getConstructors()) {
-            if (c.getParameterCount() == args.length && parametersMatch(c.getParameterTypes(), args)) {
-                return c;
+            if (c.getParameterCount() == args.length) {
+                int score = matchScore(c.getParameterTypes(), args);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = c;
+                }
             }
         }
         for (Constructor<?> c : clazz.getDeclaredConstructors()) {
-            if (c.getParameterCount() == args.length && parametersMatch(c.getParameterTypes(), args)) {
-                return c;
+            if (c.getParameterCount() == args.length) {
+                int score = matchScore(c.getParameterTypes(), args);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = c;
+                }
             }
+        }
+        if (best != null) {
+            return best;
         }
         // Fallback: first ctor with matching arity.
         for (Constructor<?> c : clazz.getConstructors()) {
@@ -390,6 +411,98 @@ public final class ReflectionEngine {
         } catch (NoSuchFieldException e) {
             throw new NoSuchFieldException("Field " + fieldName + " not found on " + clazz.getName());
         }
+    }
+
+    /**
+     * Overload score: exact type match scores 0, widening/boxing acceptance
+     * (mirroring {@link #parametersMatch} rules) scores 1, no match scores
+     * MAX_VALUE. The candidate with the lowest total wins, so e.g.
+     * {@code String.valueOf(42)} resolves to {@code valueOf(int)}, not
+     * {@code valueOf(char)}.
+     */
+    private static int matchScore(Class<?>[] paramTypes, ArgValue[] args) {
+        int total = 0;
+        for (int i = 0; i < paramTypes.length; i++) {
+            int s = singleScore(paramTypes[i], args[i]);
+            if (s == Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+            total += s;
+        }
+        return total;
+    }
+
+    private static int singleScore(Class<?> pt, ArgValue arg) {
+        if (arg.isNull()) {
+            return pt.isPrimitive() ? Integer.MAX_VALUE : 0;
+        }
+        byte tag = arg.getTag();
+        if (pt == int.class || pt == Integer.class) {
+            return tag == ArgValue.TAG_INT ? 0 : Integer.MAX_VALUE;
+        }
+        if (pt == long.class || pt == Long.class) {
+            if (tag == ArgValue.TAG_LONG) return 0;
+            if (tag == ArgValue.TAG_INT) return 1;
+            return Integer.MAX_VALUE;
+        }
+        if (pt == boolean.class || pt == Boolean.class) {
+            if (tag == ArgValue.TAG_BOOL) return 0;
+            if (tag == ArgValue.TAG_INT) return 1;
+            return Integer.MAX_VALUE;
+        }
+        if (pt == String.class || pt == CharSequence.class) {
+            return tag == ArgValue.TAG_STR ? 0 : Integer.MAX_VALUE;
+        }
+        if (pt == byte[].class) {
+            return tag == ArgValue.TAG_BYTES ? 0 : Integer.MAX_VALUE;
+        }
+        if (pt == int[].class || pt == Integer[].class) {
+            return tag == ArgValue.TAG_INT_ARRAY ? 0 : Integer.MAX_VALUE;
+        }
+        if (pt == String[].class) {
+            return tag == ArgValue.TAG_STR_ARRAY ? 0 : Integer.MAX_VALUE;
+        }
+        if (pt == byte.class || pt == Byte.class
+                || pt == short.class || pt == Short.class
+                || pt == char.class || pt == Character.class) {
+            if (tag == ArgValue.TAG_INT || tag == ArgValue.TAG_STR) return 1;
+            return Integer.MAX_VALUE;
+        }
+        if (pt == float.class || pt == Float.class
+                || pt == double.class || pt == Double.class) {
+            if (tag == ArgValue.TAG_INT || tag == ArgValue.TAG_LONG || tag == ArgValue.TAG_STR) return 1;
+            return Integer.MAX_VALUE;
+        }
+        // Reference type: tokens match anything; Str matches String-assignable
+        // targets; primitives-in-boxes widen to Object/Number.
+        if (tag == ArgValue.TAG_OBJECT_TOKEN || tag == ArgValue.TAG_CALLBACK_TOKEN) {
+            return 0;
+        }
+        if (tag == ArgValue.TAG_STR && pt == Object.class) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_STR && pt.isAssignableFrom(String.class)) {
+            return 0;
+        }
+        if (tag == ArgValue.TAG_INT && (pt == Object.class || pt == Number.class)) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_LONG && (pt == Object.class || pt == Number.class)) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_BOOL && pt == Object.class) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_BYTES && pt == Object.class) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_INT_ARRAY && pt == Object.class) {
+            return 1;
+        }
+        if (tag == ArgValue.TAG_STR_ARRAY && pt == Object.class) {
+            return 1;
+        }
+        return Integer.MAX_VALUE;
     }
 
     private static boolean parametersMatch(Class<?>[] paramTypes, ArgValue[] args) {
@@ -488,6 +601,14 @@ public final class ReflectionEngine {
         }
         if (pt == int[].class) {
             return arg.asIntArray();
+        }
+        if (pt == Integer[].class) {
+            int[] a = arg.asIntArray();
+            Integer[] boxed = new Integer[a.length];
+            for (int i = 0; i < a.length; i++) {
+                boxed[i] = a[i];
+            }
+            return boxed;
         }
         if (pt == String[].class) {
             return arg.asStrArray();

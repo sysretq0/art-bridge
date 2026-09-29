@@ -9,6 +9,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Manages bidirectional callbacks and dynamic Binder / Proxy synthesis.
@@ -23,6 +24,7 @@ public final class CallbackRegistry {
     }
 
     private static final ConcurrentHashMap<Integer, Object> REGISTRY = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Integer, AtomicBoolean> ACTIVE = new ConcurrentHashMap<>();
     private static volatile CallbackSender globalSender = null;
 
     private CallbackRegistry() {}
@@ -36,11 +38,75 @@ public final class CallbackRegistry {
     }
 
     public static void unregister(int callbackId) {
+        AtomicBoolean flag = ACTIVE.remove(callbackId);
+        if (flag != null) {
+            flag.set(false);
+        }
         REGISTRY.remove(callbackId);
     }
 
     public static void clear() {
+        for (AtomicBoolean flag : ACTIVE.values()) {
+            flag.set(false);
+        }
+        ACTIVE.clear();
         REGISTRY.clear();
+    }
+
+    private static void markActive(int callbackId) {
+        AtomicBoolean existing = ACTIVE.get(callbackId);
+        if (existing != null && existing.get()) {
+            throw new IllegalStateException("callbackId already registered: " + callbackId);
+        }
+        ACTIVE.put(callbackId, new AtomicBoolean(true));
+    }
+
+    private static boolean isActive(int callbackId) {
+        AtomicBoolean flag = ACTIVE.get(callbackId);
+        return flag != null && flag.get();
+    }
+
+    private static ArgValue encodeCallbackArg(Object obj) {
+        if (obj == null) {
+            return ArgValue.ofNull();
+        }
+        if (obj instanceof Integer) {
+            return ArgValue.ofInt((Integer) obj);
+        }
+        if (obj instanceof Long) {
+            return ArgValue.ofLong((Long) obj);
+        }
+        if (obj instanceof Boolean) {
+            return ArgValue.ofBool((Boolean) obj);
+        }
+        if (obj instanceof String) {
+            return ArgValue.ofStr((String) obj);
+        }
+        if (obj instanceof byte[]) {
+            return ArgValue.ofBytes((byte[]) obj);
+        }
+        if (obj instanceof int[]) {
+            return ArgValue.ofIntArray((int[]) obj);
+        }
+        if (obj instanceof String[]) {
+            return ArgValue.ofStrArray((String[]) obj);
+        }
+        // Any other object becomes its String form; never mint ObjectRegistry
+        // tokens the client never requested.
+        return ArgValue.ofStr(String.valueOf(obj));
+    }
+
+    private static Object defaultValue(Class<?> returnType) {
+        if (returnType == void.class) return null;
+        if (returnType == boolean.class) return false;
+        if (returnType == int.class) return 0;
+        if (returnType == long.class) return 0L;
+        if (returnType == byte.class) return (byte) 0;
+        if (returnType == short.class) return (short) 0;
+        if (returnType == char.class) return (char) 0;
+        if (returnType == float.class) return 0.0f;
+        if (returnType == double.class) return 0.0;
+        return null;
     }
 
     /**
@@ -57,6 +123,7 @@ public final class CallbackRegistry {
         if (!iface.isInterface()) {
             throw new IllegalArgumentException(interfaceClassName + " is not an interface");
         }
+        markActive(callbackId);
 
         // Backing binder delivered to system_server via asBinder().
         final DynamicBinderStub backingStub = new DynamicBinderStub(callbackId, interfaceClassName);
@@ -83,6 +150,11 @@ public final class CallbackRegistry {
                     }
                 }
 
+                // Stale proxies (after unregister/clear) must no-op.
+                if (!isActive(callbackId)) {
+                    return defaultValue(method.getReturnType());
+                }
+
                 // Deterministic method identifier: method name hash & 0x7FFFFFFF
                 int methodId = method.getName().hashCode() & 0x7FFFFFFF;
 
@@ -92,7 +164,7 @@ public final class CallbackRegistry {
                 } else {
                     args = new ArgValue[methodArgs.length];
                     for (int i = 0; i < methodArgs.length; i++) {
-                        args[i] = ArgValue.fromJavaObject(methodArgs[i]);
+                        args[i] = encodeCallbackArg(methodArgs[i]);
                     }
                 }
 
@@ -106,17 +178,7 @@ public final class CallbackRegistry {
                 }
 
                 // Return default primitive/null value
-                Class<?> returnType = method.getReturnType();
-                if (returnType == void.class) return null;
-                if (returnType == boolean.class) return false;
-                if (returnType == int.class) return 0;
-                if (returnType == long.class) return 0L;
-                if (returnType == byte.class) return (byte) 0;
-                if (returnType == short.class) return (short) 0;
-                if (returnType == char.class) return (char) 0;
-                if (returnType == float.class) return 0.0f;
-                if (returnType == double.class) return 0.0;
-                return null;
+                return defaultValue(method.getReturnType());
             }
         };
 
@@ -129,6 +191,7 @@ public final class CallbackRegistry {
      * Create and register a dynamic Binder stub that intercepts onTransact.
      */
     public static Binder registerBinderStub(int callbackId, String descriptor) {
+        markActive(callbackId);
         DynamicBinderStub stub = new DynamicBinderStub(callbackId, descriptor);
         REGISTRY.put(callbackId, stub);
         return stub;
@@ -160,8 +223,14 @@ public final class CallbackRegistry {
 
             ArgValue[] args;
             if (data != null) {
-                byte[] raw = data.marshall();
-                args = new ArgValue[]{ArgValue.ofBytes(raw)};
+                byte[] rawBytes;
+                try {
+                    rawBytes = data.marshall();
+                } catch (RuntimeException e) {
+                    // Parcels holding Binders/FDs may fail to marshall; never throw.
+                    rawBytes = new byte[0];
+                }
+                args = new ArgValue[]{ArgValue.ofBytes(rawBytes)};
             } else {
                 args = new ArgValue[0];
             }
@@ -184,8 +253,7 @@ public final class CallbackRegistry {
 
     /**
      * Manually trigger a callback event (useful for test simulations).
-     */
-    public static void triggerCallback(int callbackId, int methodOrCode, ArgValue[] args) throws Exception {
+     */    public static void triggerCallback(int callbackId, int methodOrCode, ArgValue[] args) throws Exception {
         if (!REGISTRY.containsKey(callbackId)) {
             throw new IllegalStateException("Callback " + callbackId + " not registered");
         }

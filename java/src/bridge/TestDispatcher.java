@@ -2,13 +2,18 @@ package bridge;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.charset.StandardCharsets;
 
 /**
  * Self-test harness to verify Dispatcher opcode processing, typed ArgValue framing,
  * and universal reflection.
  */
 public final class TestDispatcher {
+    private static void check(boolean cond, String msg) {
+        if (!cond) {
+            throw new AssertionError(msg);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         System.out.println("Running upgraded Java Dispatcher self-tests...");
 
@@ -26,13 +31,17 @@ public final class TestDispatcher {
         Dispatcher.dispatch(rx, tx);
         tx.flip();
 
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE : "Expected RPC_RESPONSE msg_type";
-        assert tx.getLong() == 101L : "Mismatch in req_id";
-        assert tx.get() == Dispatcher.STATUS_OK : "Status not OK";
+        byte msgType = tx.get();
+        long respId = tx.getLong();
+        byte status = tx.get();
         int len = tx.getInt();
         ArgValue pingVal = ArgValue.readFrom(tx);
-        System.out.println("  ✓ OP_PING -> " + pingVal.asString());
-        assert pingVal.asString().startsWith("PONG") : "Expected PONG";
+        String pingStr = pingVal.asString();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 101L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        System.out.println("  ✓ OP_PING -> " + pingStr);
+        check(pingStr.startsWith("PONG"), "Expected PONG");
 
         // Test 2: GET_SYSTEM_PROPERTY with ArgValue::Str
         rx.clear();
@@ -47,12 +56,16 @@ public final class TestDispatcher {
         Dispatcher.dispatch(rx, tx);
         tx.flip();
 
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 102L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
         len = tx.getInt();
         ArgValue propVal = ArgValue.readFrom(tx);
-        System.out.println("  ✓ OP_GET_SYSTEM_PROPERTY -> " + propVal.asString());
+        String propStr = propVal.asString();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 102L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        System.out.println("  ✓ OP_GET_SYSTEM_PROPERTY -> " + propStr);
 
         // Test 3: INVOKE_STATIC_METHOD (android.os.SystemProperties.get(key, def))
         rx.clear();
@@ -69,22 +82,27 @@ public final class TestDispatcher {
         Dispatcher.dispatch(rx, tx);
         tx.flip();
 
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 103L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
         len = tx.getInt();
         ArgValue staticResult = ArgValue.readFrom(tx);
-        System.out.println("  ✓ OP_INVOKE_STATIC_METHOD -> " + staticResult.asString());
-        assert "Pixel 9".equals(staticResult.asString());
+        String staticStr = staticResult.asString();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 103L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        System.out.println("  ✓ OP_INVOKE_STATIC_METHOD -> " + staticStr);
+        check("Pixel 9".equals(staticStr), "Expected Pixel 9, got " + staticStr);
 
         // Test 4: Dynamic Callback Trigger (register first so trigger validates)
         final boolean[] callbackFired = new boolean[1];
         CallbackRegistry.setCallbackSender((cbId, code, cbArgs) -> {
             System.out.println("  ✓ Async Callback Event fired: id=" + cbId + " code=" + code + " argsCount=" + cbArgs.length);
-            assert cbId == 42;
-            assert code == 1001;
-            assert cbArgs.length == 1;
-            assert "event_data".equals(cbArgs[0].asString());
+            check(cbId == 42, "Expected callback id 42, got " + cbId);
+            check(code == 1001, "Expected code 1001, got " + code);
+            check(cbArgs.length == 1, "Expected 1 callback arg, got " + cbArgs.length);
+            String cbArgStr = cbArgs[0].asString();
+            check("event_data".equals(cbArgStr), "Expected event_data, got " + cbArgStr);
             callbackFired[0] = true;
         });
         CallbackRegistry.registerInterfaceProxy(42, "java.lang.Runnable");
@@ -102,10 +120,13 @@ public final class TestDispatcher {
         Dispatcher.dispatch(rx, tx);
         tx.flip();
 
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 104L;
-        assert tx.get() == Dispatcher.STATUS_OK;
-        assert callbackFired[0] : "Callback was not fired";
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 104L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        check(callbackFired[0], "Callback was not fired");
 
         // Test 5: NEW_INSTANCE -> INVOKE_INSTANCE_METHOD -> GET/SET_FIELD -> RELEASE_OBJECT
         rx.clear();
@@ -119,13 +140,17 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 105L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
         len = tx.getInt();
         ArgValue tokVal = ArgValue.readFrom(tx);
-        assert tokVal.getTag() == ArgValue.TAG_OBJECT_TOKEN : "Expected ObjectToken";
+        byte tokTag = tokVal.getTag();
         int objId = tokVal.asObjectToken();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 105L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        check(tokTag == ArgValue.TAG_OBJECT_TOKEN, "Expected ObjectToken");
         System.out.println("  ✓ OP_NEW_INSTANCE -> ObjectToken(" + objId + ")");
 
         rx.clear();
@@ -138,13 +163,17 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 106L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
         len = tx.getInt();
         ArgValue nameVal = ArgValue.readFrom(tx);
-        assert "selftest".equals(nameVal.asString());
-        System.out.println("  ✓ OP_INVOKE_INSTANCE_METHOD -> " + nameVal.asString());
+        String nameStr = nameVal.asString();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 106L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        check("selftest".equals(nameStr), "Expected selftest, got " + nameStr);
+        System.out.println("  ✓ OP_INVOKE_INSTANCE_METHOD -> " + nameStr);
 
         rx.clear();
         rx.putLong(107L);
@@ -156,13 +185,17 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 107L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
         len = tx.getInt();
         ArgValue counterVal = ArgValue.readFrom(tx);
-        assert counterVal.asInt() == 7 : "Expected counter 7, got " + counterVal.asInt();
-        System.out.println("  ✓ OP_GET_FIELD -> " + counterVal.asInt());
+        int counter = counterVal.asInt();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 107L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        check(counter == 7, "Expected counter 7, got " + counter);
+        System.out.println("  ✓ OP_GET_FIELD -> " + counter);
 
         rx.clear();
         rx.putLong(108L);
@@ -175,9 +208,12 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 108L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 108L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
         System.out.println("  ✓ OP_SET_FIELD -> OK");
 
         rx.clear();
@@ -189,9 +225,12 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 109L;
-        assert tx.get() == Dispatcher.STATUS_OK;
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 109L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
         System.out.println("  ✓ OP_RELEASE_OBJECT -> OK");
 
         // Test 6: UNREGISTER_CALLBACK
@@ -205,10 +244,14 @@ public final class TestDispatcher {
         tx.clear();
         Dispatcher.dispatch(rx, tx);
         tx.flip();
-        assert tx.get() == Dispatcher.MSG_TYPE_RPC_RESPONSE;
-        assert tx.getLong() == 110L;
-        assert tx.get() == Dispatcher.STATUS_OK;
-        assert CallbackRegistry.getRegistered(43) == null : "Callback should be unregistered";
+        msgType = tx.get();
+        respId = tx.getLong();
+        status = tx.get();
+        Object remaining = CallbackRegistry.getRegistered(43);
+        check(msgType == Dispatcher.MSG_TYPE_RPC_RESPONSE, "Expected RPC_RESPONSE msg_type");
+        check(respId == 110L, "Mismatch in req_id");
+        check(status == Dispatcher.STATUS_OK, "Status not OK");
+        check(remaining == null, "Callback should be unregistered");
         System.out.println("  ✓ OP_UNREGISTER_CALLBACK -> OK");
 
         System.out.println("All upgraded Java Dispatcher self-tests passed successfully!");

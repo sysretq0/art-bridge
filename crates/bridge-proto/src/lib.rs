@@ -327,39 +327,54 @@ impl<'a> ArgValue<'a> {
         }
 
         let tag = buf[0];
-        let mut offset = 1;
+        let mut offset: usize = 1;
 
         let val = match tag {
             TAG_NULL => ArgValue::Null,
             TAG_INT => {
-                if buf.len() < offset + 4 {
+                let end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "int payload",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "int payload",
-                        expected: offset + 4,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let v = i32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+                let v = i32::from_le_bytes(buf[offset..end].try_into().unwrap());
                 offset += 4;
                 ArgValue::Int(v)
             }
             TAG_LONG => {
-                if buf.len() < offset + 8 {
+                let end = offset.checked_add(8).ok_or(ProtoError::Truncated {
+                    field: "long payload",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "long payload",
-                        expected: offset + 8,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let v = i64::from_le_bytes(buf[offset..offset + 8].try_into().unwrap());
+                let v = i64::from_le_bytes(buf[offset..end].try_into().unwrap());
                 offset += 8;
                 ArgValue::Long(v)
             }
             TAG_BOOL => {
-                if buf.len() < offset + 1 {
+                let end = offset.checked_add(1).ok_or(ProtoError::Truncated {
+                    field: "bool payload",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "bool payload",
-                        expected: offset + 1,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
@@ -368,136 +383,201 @@ impl<'a> ArgValue<'a> {
                 ArgValue::Bool(v)
             }
             TAG_STR => {
-                if buf.len() < offset + 2 {
+                let len_end = offset.checked_add(2).ok_or(ProtoError::Truncated {
+                    field: "str len",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < len_end {
                     return Err(ProtoError::Truncated {
                         field: "str len",
-                        expected: offset + 2,
+                        expected: len_end,
                         available: buf.len(),
                     });
                 }
-                let len = u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap()) as usize;
+                let len = u16::from_le_bytes(buf[offset..len_end].try_into().unwrap()) as usize;
                 offset += 2;
-                if buf.len() < offset + len {
+                let end = offset.checked_add(len).ok_or(ProtoError::Truncated {
+                    field: "str utf8",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "str utf8",
-                        expected: offset + len,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let s = std::str::from_utf8(&buf[offset..offset + len])
-                    .map_err(ProtoError::InvalidUtf8)?;
+                let s = std::str::from_utf8(&buf[offset..end]).map_err(ProtoError::InvalidUtf8)?;
                 offset += len;
                 ArgValue::Str(s)
             }
             TAG_BYTES => {
-                if buf.len() < offset + 4 {
+                let len_end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "bytes len",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < len_end {
                     return Err(ProtoError::Truncated {
                         field: "bytes len",
-                        expected: offset + 4,
+                        expected: len_end,
                         available: buf.len(),
                     });
                 }
-                let len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(buf[offset..len_end].try_into().unwrap()) as usize;
                 offset += 4;
-                if buf.len() < offset + len {
+                let end = offset.checked_add(len).ok_or(ProtoError::Truncated {
+                    field: "bytes data",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "bytes data",
-                        expected: offset + len,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let b = &buf[offset..offset + len];
+                let b = &buf[offset..end];
                 offset += len;
                 ArgValue::Bytes(b)
             }
             TAG_CALLBACK_TOKEN => {
-                if buf.len() < offset + 4 {
+                let end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "callback token",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "callback token",
-                        expected: offset + 4,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let tok = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+                let tok = u32::from_le_bytes(buf[offset..end].try_into().unwrap());
                 offset += 4;
                 ArgValue::CallbackToken(tok)
             }
             TAG_OBJECT_TOKEN => {
-                if buf.len() < offset + 4 {
+                let end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "object token",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < end {
                     return Err(ProtoError::Truncated {
                         field: "object token",
-                        expected: offset + 4,
+                        expected: end,
                         available: buf.len(),
                     });
                 }
-                let tok = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+                let tok = u32::from_le_bytes(buf[offset..end].try_into().unwrap());
                 offset += 4;
                 ArgValue::ObjectToken(tok)
             }
             TAG_INT_ARRAY => {
-                if buf.len() < offset + 4 {
+                let len_end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "int array len",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < len_end {
                     return Err(ProtoError::Truncated {
                         field: "int array len",
-                        expected: offset + 4,
+                        expected: len_end,
                         available: buf.len(),
                     });
                 }
-                let len = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(buf[offset..len_end].try_into().unwrap()) as usize;
                 offset += 4;
-                if buf.len() < offset + 4 * len {
+                let byte_len = 4usize.checked_mul(len).ok_or(ProtoError::Truncated {
+                    field: "int array data",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                let data_end = offset.checked_add(byte_len).ok_or(ProtoError::Truncated {
+                    field: "int array data",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < data_end {
                     return Err(ProtoError::Truncated {
                         field: "int array data",
-                        expected: offset + 4 * len,
+                        expected: data_end,
                         available: buf.len(),
                     });
                 }
                 let mut v = Vec::with_capacity(len);
                 for _ in 0..len {
-                    v.push(i32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()));
+                    v.push(i32::from_le_bytes(
+                        buf[offset..offset + 4].try_into().unwrap(),
+                    ));
                     offset += 4;
                 }
                 ArgValue::IntArray(v)
             }
             TAG_STR_ARRAY => {
-                if buf.len() < offset + 4 {
+                let len_end = offset.checked_add(4).ok_or(ProtoError::Truncated {
+                    field: "str array len",
+                    expected: usize::MAX,
+                    available: buf.len(),
+                })?;
+                if buf.len() < len_end {
                     return Err(ProtoError::Truncated {
                         field: "str array len",
-                        expected: offset + 4,
+                        expected: len_end,
                         available: buf.len(),
                     });
                 }
-                let count =
-                    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap()) as usize;
+                let count = u32::from_le_bytes(buf[offset..len_end].try_into().unwrap()) as usize;
                 offset += 4;
                 let remaining = buf.len() - offset;
-                if count.saturating_mul(2) > remaining {
+                let min_needed = count.checked_mul(2).ok_or(ProtoError::Truncated {
+                    field: "str array count",
+                    expected: usize::MAX,
+                    available: remaining,
+                })?;
+                if min_needed > remaining {
                     return Err(ProtoError::Truncated {
                         field: "str array count",
-                        expected: count.saturating_mul(2),
+                        expected: min_needed,
                         available: remaining,
                     });
                 }
                 let mut v = Vec::with_capacity(count);
                 for _ in 0..count {
-                    if buf.len() < offset + 2 {
+                    let slen_end = offset.checked_add(2).ok_or(ProtoError::Truncated {
+                        field: "str array elem len",
+                        expected: usize::MAX,
+                        available: buf.len(),
+                    })?;
+                    if buf.len() < slen_end {
                         return Err(ProtoError::Truncated {
                             field: "str array elem len",
-                            expected: offset + 2,
+                            expected: slen_end,
                             available: buf.len(),
                         });
                     }
                     let slen =
-                        u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap()) as usize;
+                        u16::from_le_bytes(buf[offset..slen_end].try_into().unwrap()) as usize;
                     offset += 2;
-                    if buf.len() < offset + slen {
+                    let send = offset.checked_add(slen).ok_or(ProtoError::Truncated {
+                        field: "str array elem utf8",
+                        expected: usize::MAX,
+                        available: buf.len(),
+                    })?;
+                    if buf.len() < send {
                         return Err(ProtoError::Truncated {
                             field: "str array elem utf8",
-                            expected: offset + slen,
+                            expected: send,
                             available: buf.len(),
                         });
                     }
-                    let s = std::str::from_utf8(&buf[offset..offset + slen])
-                        .map_err(ProtoError::InvalidUtf8)?;
+                    let s =
+                        std::str::from_utf8(&buf[offset..send]).map_err(ProtoError::InvalidUtf8)?;
                     offset += slen;
                     v.push(s.to_string());
                 }
@@ -755,11 +835,7 @@ impl<'a> Request<'a> {
         )
     }
 
-    pub fn new_instance(
-        req_id: u64,
-        class_name: &'a str,
-        ctor_args: &[ArgValue<'a>],
-    ) -> Self {
+    pub fn new_instance(req_id: u64, class_name: &'a str, ctor_args: &[ArgValue<'a>]) -> Self {
         let mut args = Vec::with_capacity(1 + ctor_args.len());
         args.push(ArgValue::Str(class_name));
         args.extend_from_slice(ctor_args);
@@ -780,7 +856,11 @@ impl<'a> Request<'a> {
     }
 
     pub fn get_field(req_id: u64, target: ArgValue<'a>, field_name: &'a str) -> Self {
-        Self::new(req_id, OP_GET_FIELD, vec![target, ArgValue::Str(field_name)])
+        Self::new(
+            req_id,
+            OP_GET_FIELD,
+            vec![target, ArgValue::Str(field_name)],
+        )
     }
 
     pub fn set_field(
@@ -939,20 +1019,26 @@ impl<'a> Response<'a> {
         }
         if !self.payload.is_empty() && self.payload[0] == TAG_STR && self.payload.len() >= 3 {
             let len = u16::from_le_bytes(self.payload[1..3].try_into().unwrap()) as usize;
-            if self.payload.len() == 3 + len {
-                return std::str::from_utf8(&self.payload[3..3 + len])
-                    .map_err(ProtoError::InvalidUtf8);
+            let end = 3usize.checked_add(len).ok_or(ProtoError::Truncated {
+                field: "str payload",
+                expected: usize::MAX,
+                available: self.payload.len(),
+            })?;
+            if self.payload.len() == end {
+                return std::str::from_utf8(&self.payload[3..end]).map_err(ProtoError::InvalidUtf8);
             }
         }
         std::str::from_utf8(self.payload).map_err(ProtoError::InvalidUtf8)
     }
 
     pub fn encoded_len(&self) -> usize {
-        RESP_HEADER_SIZE + self.payload.len()
+        RESP_HEADER_SIZE.saturating_add(self.payload.len())
     }
 
     pub fn encode_into(&self, buf: &mut [u8]) -> Result<usize, ProtoError> {
-        let needed = self.encoded_len();
+        let needed = RESP_HEADER_SIZE
+            .checked_add(self.payload.len())
+            .ok_or(ProtoError::LengthOverflow)?;
         if needed > MAX_PACKET_SIZE {
             return Err(ProtoError::PacketTooLarge {
                 size: needed,
@@ -973,7 +1059,7 @@ impl<'a> Response<'a> {
         buf[1..9].copy_from_slice(&self.req_id.to_le_bytes());
         buf[9] = self.status;
         buf[10..14].copy_from_slice(&(self.payload.len() as u32).to_le_bytes());
-        buf[14..14 + self.payload.len()].copy_from_slice(self.payload);
+        buf[14..needed].copy_from_slice(self.payload);
 
         Ok(needed)
     }
@@ -1000,18 +1086,25 @@ impl<'a> Response<'a> {
         let status = buf[9];
         let payload_len = u32::from_le_bytes(buf[10..14].try_into().unwrap()) as usize;
 
-        if buf.len() < 14 + payload_len {
+        let end = 14usize
+            .checked_add(payload_len)
+            .ok_or(ProtoError::Truncated {
+                field: "response payload",
+                expected: usize::MAX,
+                available: buf.len(),
+            })?;
+        if buf.len() < end {
             return Err(ProtoError::Truncated {
                 field: "response payload",
-                expected: 14 + payload_len,
+                expected: end,
                 available: buf.len(),
             });
         }
 
-        let payload = &buf[14..14 + payload_len];
-        if 14 + payload_len != buf.len() {
+        let payload = &buf[14..end];
+        if end != buf.len() {
             return Err(ProtoError::TrailingBytes {
-                expected: 14 + payload_len,
+                expected: end,
                 actual: buf.len(),
             });
         }
@@ -1216,7 +1309,9 @@ pub fn encode_response_slice(
     payload: &[u8],
     buf: &mut [u8],
 ) -> Result<usize, ProtoError> {
-    let needed = RESP_HEADER_SIZE + payload.len();
+    let needed = RESP_HEADER_SIZE
+        .checked_add(payload.len())
+        .ok_or(ProtoError::LengthOverflow)?;
     if needed > MAX_PACKET_SIZE {
         return Err(ProtoError::PacketTooLarge {
             size: needed,
@@ -1234,7 +1329,7 @@ pub fn encode_response_slice(
     buf[1..9].copy_from_slice(&req_id.to_le_bytes());
     buf[9] = status;
     buf[10..14].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    buf[14..14 + payload.len()].copy_from_slice(payload);
+    buf[14..needed].copy_from_slice(payload);
 
     Ok(needed)
 }
@@ -1383,5 +1478,37 @@ mod tests {
             }
             IncomingMessage::Response(_) => panic!("Expected Callback"),
         }
+    }
+
+    #[test]
+    fn test_truncated_str_errors_not_panics() {
+        // TAG_STR claims 10 bytes but only 1 follows.
+        let buf = [TAG_STR, 10, 0, b'a'];
+        let err = ArgValue::decode_from(&buf).unwrap_err();
+        assert!(matches!(
+            err,
+            ProtoError::Truncated {
+                field: "str utf8",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_truncated_response_payload_errors() {
+        let mut buf = vec![0u8; RESP_HEADER_SIZE];
+        buf[0] = MSG_TYPE_RPC_RESPONSE;
+        buf[10..14].copy_from_slice(&100u32.to_le_bytes());
+        let err = Response::decode_from(&buf).unwrap_err();
+        assert!(matches!(err, ProtoError::Truncated { .. }));
+    }
+
+    #[test]
+    fn test_response_slice_roundtrip() {
+        let mut buf = vec![0u8; 64];
+        let n = encode_response_slice(7, STATUS_OK, b"hi", &mut buf).unwrap();
+        let resp = Response::decode_from(&buf[..n]).unwrap();
+        assert_eq!(resp.req_id, 7);
+        assert_eq!(resp.payload, b"hi");
     }
 }

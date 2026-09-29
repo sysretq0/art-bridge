@@ -77,6 +77,9 @@ Arguments and return values are encoded using compact binary tags:
 | `0x04` | `Str` | `len: u16` (2 bytes LE) + `utf8_bytes` |
 | `0x05` | `Bytes` | `len: u32` (4 bytes LE) + `raw_bytes` |
 | `0x06` | `CallbackToken` | `token: u32` (4 bytes LE) |
+| `0x07` | `ObjectToken` | `token: u32` (4 bytes LE) |
+| `0x08` | `IntArray` | `len: u32` (4 bytes LE) + `len × i32` (4 bytes LE each) |
+| `0x09` | `StrArray` | `count: u32` (4 bytes LE) + [`len: u16` (2 bytes LE) + `utf8_bytes`]... |
 
 ### 2. Request Frame (Client -> Worker)
 
@@ -87,7 +90,7 @@ Arguments and return values are encoded using compact binary tags:
 ```
 
 - `req_id` (`u64`): Multiplexed correlation identifier.
-- `opcode` (`u16`): Operation code (e.g. `0x0010` for `INVOKE_STATIC_METHOD`).
+- `opcode` (`u16`): Operation code (e.g. `0x0010` for `INVOKE_SERVICE_METHOD`).
 - `argc` (`u16`): Count of `ArgValue` arguments.
 - Arguments: `argc` sequential tagged `ArgValue` encodings.
 
@@ -139,12 +142,18 @@ Incoming frames are distinguished by an initial `msg_type: u8` byte:
 ### Universal Reflection & Dynamic Callback Opcodes
 | Opcode | Name | Arguments | Description |
 |---|---|---|---|
-| `0x0010` | `INVOKE_STATIC_METHOD` | `className: Str`, `methodName: Str`, `args...` | Dynamically executes any static method |
-| `0x0011` | `INVOKE_SERVICE_METHOD` | `service: Str`, `aidlInterface: Str`, `method: Str`, `args...` | Resolves service via `ServiceManager`, proxies via `<Interface>$Stub.asInterface`, invokes method, and retries on `DeadObjectException` |
+| `0x0010` | `INVOKE_SERVICE_METHOD` | `service: Str`, `aidlInterface: Str`, `method: Str`, `args...` | Resolves service via `ServiceManager`, proxies via `<Interface>$Stub.asInterface`, invokes method, and retries on `DeadObjectException` |
+| `0x0011` | `INVOKE_STATIC_METHOD` | `className: Str`, `methodName: Str`, `args...` | Dynamically executes any static method |
 | `0x0012` | `RAW_BINDER_TRANSACT` | `service: Str`, `code: Int`, `args...` | Marshals arguments into `Parcel`, calls `IBinder.transact()`, and returns reply bytes |
 | `0x0013` | `REGISTER_CALLBACK_PROXY`| `callbackId: Int`, `interfaceName: Str` | Creates dynamic `java.lang.reflect.Proxy` forwarding calls as `0x02` async events |
 | `0x0014` | `REGISTER_BINDER_STUB` | `callbackId: Int`, `descriptor: Str` | Creates custom `android.os.Binder` stub forwarding `onTransact` as `0x02` async events |
 | `0x0015` | `UNREGISTER_CALLBACK` | `callbackId: Int` | Releases registered callback proxy or stub |
+| `0x0016` | `NEW_INSTANCE` | `className: Str`, `args...` | Instantiates an arbitrary object, returns `ObjectToken` |
+| `0x0017` | `INVOKE_INSTANCE_METHOD` | `target: ObjectToken`, `methodName: Str`, `args...` | Invokes a method on a stored `ObjectToken` |
+| `0x0018` | `GET_FIELD` | `target: ObjectToken|Str`, `fieldName: Str` | Reads an instance or static field |
+| `0x0019` | `RELEASE_OBJECT` | `token: ObjectToken` | Removes an `ObjectToken` from the registry |
+| `0x001A` | `TRIGGER_CALLBACK` | `callbackId: Int`, `methodOrCode: Int`, `args...` | Test-only: manually fires a registered callback |
+| `0x001B` | `SET_FIELD` | `target: ObjectToken|Str`, `fieldName: Str`, `value` | Writes an instance or static field (note: out of numeric order by design) |
 | `0x8000` | `ECHO` | `value: ArgValue` | Echoes argument back for boundary and large-payload testing |
 
 ---
@@ -160,6 +169,7 @@ Incoming frames are distinguished by an initial `msg_type: u8` byte:
    Avoids filesystem permission issues and leaves no stale socket files on disk.
 3. **Peer Credential Authentication (`SO_PEERCRED`)**:
    Inspects caller UID at connection acceptance, allowing only the identical UID unless an explicit `--allow-uid` exception was passed. No implicit root/shell bypass. The Rust client also verifies the server UID after `connect()`.
+   Trust boundary: the abstract socket is world-reachable to any local UID, so `SO_PEERCRED` is the sole gate — same-UID by default, `--allow-uid <uid>` (repeatable, comma-separated) as the only escape hatch. If peer credentials are unavailable the connection is refused (fail-closed).
 4. **Packet Truncation Detection (`MSG_TRUNC`)**:
    The native Rust client passes `libc::MSG_TRUNC` to `recv(2)`. If a response exceeds 64 KB, the client safely errors with `ClientError::PacketTruncated` rather than panicking on truncated deserialization.
 5. **Thread-Safe Socket Multiplexing**:

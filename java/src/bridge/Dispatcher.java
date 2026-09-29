@@ -291,7 +291,9 @@ public final class Dispatcher {
                 }
             }
         } catch (Throwable t) {
-            String err = (t.getMessage() != null) ? (t.getClass().getSimpleName() + ": " + t.getMessage()) : t.toString();
+            tx.clear();
+            Throwable cause = (t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null) ? t.getCause() : t;
+            String err = (cause.getMessage() != null) ? (cause.getClass().getSimpleName() + ": " + cause.getMessage()) : cause.toString();
             writeError(tx, reqId, STATUS_ERROR, err);
         }
     }

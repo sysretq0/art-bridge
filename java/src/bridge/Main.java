@@ -276,7 +276,7 @@ public final class Main {
         try {
             StructUcred ucred = Os.getsockoptUcred(fd, OsConstants.SOL_SOCKET, OsConstants.SO_PEERCRED);
             if (ucred == null) {
-                return true; // If ucred not queryable, proceed
+                return false; // Fail closed when peer credentials are not queryable
             }
             int myUid = Os.getuid();
             if (ucred.uid == myUid) {
@@ -290,8 +290,8 @@ public final class Main {
             System.err.println("[art-bridge] Access Denied: Peer UID " + ucred.uid + " does not match my UID " + myUid);
             return false;
         } catch (Throwable t) {
-            // If SO_PEERCRED is unsupported on host stub runtime, allow
-            return true;
+            // Fail closed when SO_PEERCRED is unsupported or unreadable
+            return false;
         }
     }
 

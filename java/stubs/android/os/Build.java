@@ -5,7 +5,7 @@ package android.os;
  */
 public class Build {
     public static class VERSION {
-        public static final int SDK_INT = 34;
+        public static final int SDK_INT = Integer.parseInt("34");
         public static final String RELEASE = "14";
         public static final String CODENAME = "REL";
     }

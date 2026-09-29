@@ -13,12 +13,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class ObjectRegistry {
     private static final ConcurrentHashMap<Integer, Object> OBJECTS = new ConcurrentHashMap<>();
     private static final AtomicInteger NEXT_ID = new AtomicInteger(1);
+    static final int MAX_OBJECTS = 4096;
 
     private ObjectRegistry() {}
 
     public static int put(Object obj) {
         if (obj == null) {
             throw new IllegalArgumentException("Cannot store null in ObjectRegistry");
+        }
+        if (OBJECTS.size() >= MAX_OBJECTS) {
+            throw new IllegalStateException("ObjectRegistry full");
         }
         int id = NEXT_ID.getAndIncrement();
         // Avoid id 0 (reserved); wrap on overflow.

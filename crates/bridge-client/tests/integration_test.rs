@@ -3,8 +3,8 @@ use bridge_client::{
     OP_FORCE_STOP_PACKAGE, OP_GET_FIELD, OP_GET_SYSTEM_PROPERTY, OP_INVOKE_INSTANCE_METHOD,
     OP_INVOKE_SERVICE_METHOD, OP_INVOKE_STATIC_METHOD, OP_NEW_INSTANCE, OP_PING,
     OP_RAW_BINDER_TRANSACT, OP_REGISTER_CALLBACK_PROXY, OP_RELEASE_OBJECT, OP_SET_FIELD,
-    OP_SET_PROCESS_LIMIT,
-    OP_TRIGGER_CALLBACK, OP_UNREGISTER_CALLBACK, STATUS_ERROR, STATUS_OK, STATUS_UNKNOWN_OPCODE,
+    OP_SET_PROCESS_LIMIT, OP_TRIGGER_CALLBACK, OP_UNREGISTER_CALLBACK, STATUS_ERROR, STATUS_OK,
+    STATUS_UNKNOWN_OPCODE,
 };
 use bridge_proto::{Request, Response, MAX_PACKET_SIZE, MSG_TYPE_RPC_RESPONSE};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -301,17 +301,20 @@ struct LiveJvmSession {
 }
 
 impl LiveJvmSession {
-    fn start() -> Option<(Self, std::process::ChildStdin, std::process::ChildStdout)> {
-        let jar_path = "/work/art-bridge/java/build/art-bridge.jar";
+    fn start() -> (Self, std::process::ChildStdin, std::process::ChildStdout) {
+        let jar_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../java/build/art-bridge.jar");
+        assert!(
+            jar_path.exists(),
+            "art-bridge.jar missing at {} — run bash java/build.sh",
+            jar_path.display()
+        );
         let stubs_path = "/work/art-bridge/java/build/stubs_classes";
-        if !std::path::Path::new(jar_path).exists() {
-            return None;
-        }
 
         let mut child = std::process::Command::new("java")
             .args([
                 "-cp",
-                &format!("{jar_path}:{stubs_path}"),
+                &format!("{}:{stubs_path}", jar_path.display()),
                 "bridge.EchoDispatcher",
             ])
             .stdin(std::process::Stdio::piped())
@@ -322,7 +325,7 @@ impl LiveJvmSession {
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
 
-        Some((Self { child }, stdin, stdout))
+        (Self { child }, stdin, stdout)
     }
 }
 
@@ -365,11 +368,7 @@ fn jvm_roundtrip(
 
 #[test]
 fn test_live_jvm_universal_reflection_mixed_args() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // 1. Invoke static method: java.lang.String.valueOf(int)
     let resp1 = jvm_roundtrip(
@@ -454,11 +453,7 @@ fn test_live_jvm_universal_reflection_mixed_args() {
 
 #[test]
 fn test_live_jvm_async_callback_multiplexing() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
     use std::io::{Read, Write};
 
     // 1. Register a dynamic callback proxy
@@ -535,11 +530,7 @@ fn test_live_jvm_async_callback_multiplexing() {
 
 #[test]
 fn test_live_jvm_unsigned_boundary_large_payload() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // Prepare 40 KB string payload (> 32768 bytes, tests unsigned u16 arg length & payload)
     let large_string = "X".repeat(40_000);
@@ -568,11 +559,7 @@ fn test_live_jvm_unsigned_boundary_large_payload() {
 
 #[test]
 fn test_live_jvm_raw_binder_transact() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // Call rawBinderTransact on activity service
     let resp = jvm_roundtrip(
@@ -599,9 +586,8 @@ fn test_request_timeout_expires() {
     // Server that accepts one connection and never responds.
     let server_name = socket_name.clone();
     let handle = thread::spawn(move || {
-        let server_fd = unsafe {
-            libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0)
-        };
+        let server_fd =
+            unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) };
         assert!(server_fd >= 0);
         let _owned = unsafe { OwnedFd::from_raw_fd(server_fd) };
         let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
@@ -616,7 +602,13 @@ fn test_request_timeout_expires() {
         let addr_len =
             (std::mem::size_of::<libc::sa_family_t>() + 1 + server_name.len()) as libc::socklen_t;
         assert_eq!(
-            unsafe { libc::bind(server_fd, (&addr as *const libc::sockaddr_un).cast(), addr_len) },
+            unsafe {
+                libc::bind(
+                    server_fd,
+                    (&addr as *const libc::sockaddr_un).cast(),
+                    addr_len,
+                )
+            },
             0
         );
         assert_eq!(unsafe { libc::listen(server_fd, 1) }, 0);
@@ -650,11 +642,7 @@ fn test_request_timeout_expires() {
 
 #[test]
 fn test_live_jvm_object_lifecycle() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // NEW_INSTANCE bridge.SampleObject(String, int)
     let resp = jvm_roundtrip(
@@ -824,11 +812,7 @@ fn test_live_jvm_object_lifecycle() {
 
 #[test]
 fn test_live_jvm_array_passing() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // ECHO roundtrips for the new array wire types
     let resp = jvm_roundtrip(
@@ -897,10 +881,7 @@ fn test_live_jvm_array_passing() {
         ],
     );
     assert_eq!(resp.status, STATUS_OK);
-    assert_eq!(
-        resp.payload_as_arg_value().unwrap(),
-        ArgValue::Str("a,b,c")
-    );
+    assert_eq!(resp.payload_as_arg_value().unwrap(), ArgValue::Str("a,b,c"));
 
     // Array fields round-trip through GET_FIELD
     let resp = jvm_roundtrip(
@@ -941,11 +922,7 @@ fn test_live_jvm_array_passing() {
 
 #[test]
 fn test_live_jvm_unregister_callback() {
-    let session = LiveJvmSession::start();
-    if session.is_none() {
-        return;
-    }
-    let (_session, mut stdin, mut stdout) = session.unwrap();
+    let (_session, mut stdin, mut stdout) = LiveJvmSession::start();
 
     // Register, then unregister; trigger afterwards must fail.
     let resp = jvm_roundtrip(

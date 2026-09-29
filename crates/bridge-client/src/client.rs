@@ -1,7 +1,7 @@
 use crate::error::ClientError;
 use bridge_proto::{
-    encode_request_args, ArgValue, ArgValueOwned, CallbackEventOwned, IncomingMessage, Response,
-    MAX_PACKET_SIZE, MSG_TYPE_RPC_RESPONSE, OP_CHECK_SERVICE, OP_FORCE_STOP_PACKAGE,
+    encode_request_args, ArgValue, ArgValueOwned, CallbackEventOwned, IncomingMessage, ProtoError,
+    Response, MAX_PACKET_SIZE, MSG_TYPE_RPC_RESPONSE, OP_CHECK_SERVICE, OP_FORCE_STOP_PACKAGE,
     OP_GET_FIELD, OP_GET_SYSTEM_PROPERTY, OP_INVOKE_INSTANCE_METHOD, OP_INVOKE_SERVICE_METHOD,
     OP_INVOKE_STATIC_METHOD, OP_NEW_INSTANCE, OP_PING, OP_RAW_BINDER_TRANSACT,
     OP_REGISTER_BINDER_CALLBACK, OP_REGISTER_CALLBACK_PROXY, OP_RELEASE_OBJECT, OP_SET_FIELD,
@@ -98,6 +98,19 @@ impl BridgeClient {
         Self::from_connected_fd(owned_fd)
     }
 
+    /// Connect to a specified abstract UNIX socket name, accepting the daemon's
+    /// `--allow-uid` value for call-site symmetry.
+    ///
+    /// UID enforcement is daemon-side (same-UID only unless the daemon was
+    /// started with `--allow-uid`), so the client ignores `allow_uid` and still
+    /// verifies via `SO_PEERCRED` that the peer UID matches its own.
+    pub fn connect_with_allow_uid(
+        socket_name: &[u8],
+        _allow_uid: Option<u32>,
+    ) -> Result<Self, ClientError> {
+        Self::connect_to(socket_name)
+    }
+
     /// Adopt an existing connected file descriptor (useful for testing and custom transports).
     /// Verifies SO_PEERCRED before adopting; rejects peers with a foreign UID.
     pub fn from_connected_fd(fd: OwnedFd) -> Result<Self, ClientError> {
@@ -145,9 +158,7 @@ impl BridgeClient {
         loop {
             let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
             if ret > 0 {
-                return Ok(
-                    (pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0,
-                );
+                return Ok((pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0);
             } else if ret == 0 {
                 return Ok(false);
             } else {
@@ -169,18 +180,24 @@ impl BridgeClient {
             .map_err(ClientError::Proto)?;
 
         let raw_fd = self.as_raw_fd();
-        let sent = unsafe {
-            libc::send(
-                raw_fd,
-                self.tx_buf.as_ptr().cast(),
-                written,
-                libc::MSG_NOSIGNAL,
-            )
+        let sent = loop {
+            let ret = unsafe {
+                libc::send(
+                    raw_fd,
+                    self.tx_buf.as_ptr().cast(),
+                    written,
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(ClientError::Io(err));
+            }
+            break ret;
         };
-
-        if sent < 0 {
-            return Err(ClientError::Io(std::io::Error::last_os_error()));
-        }
         if sent as usize != written {
             return Err(ClientError::Io(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
@@ -231,12 +248,16 @@ impl BridgeClient {
             Some(d) => {
                 let cap: i64 = d.as_millis().try_into().unwrap_or(i32::MAX as i64);
                 let cap = cap.clamp(0, i32::MAX as i64) as i32;
-                if timeout_ms < 0 { cap } else { timeout_ms.min(cap) }
+                if timeout_ms < 0 {
+                    cap
+                } else {
+                    timeout_ms.min(cap)
+                }
             }
         }
     }
 
-    /// Stash an out-of-order response, evicting an arbitrary entry past the bound.
+    /// Stash an out-of-order response, evicting the oldest (lowest req_id) entry past the bound.
     fn stash_response(
         map: &mut HashMap<u64, (u8, Vec<u8>)>,
         req_id: u64,
@@ -244,7 +265,7 @@ impl BridgeClient {
         payload: &[u8],
     ) {
         if map.len() >= MAX_QUEUED_MESSAGES {
-            if let Some(k) = map.keys().next().copied() {
+            if let Some(k) = map.keys().min().copied() {
                 map.remove(&k);
             }
         }
@@ -266,7 +287,9 @@ impl BridgeClient {
     pub fn recv_response(&mut self, expected_id: u64) -> Result<Response<'_>, ClientError> {
         // Check if response was already received while processing other messages
         if let Some((status, payload)) = self.pending_responses.remove(&expected_id) {
-            let total = 14 + payload.len();
+            let total = 14usize
+                .checked_add(payload.len())
+                .ok_or(ClientError::Proto(ProtoError::LengthOverflow))?;
             self.rx_buf[0] = MSG_TYPE_RPC_RESPONSE;
             self.rx_buf[1..9].copy_from_slice(&expected_id.to_le_bytes());
             self.rx_buf[9] = status;
@@ -341,6 +364,8 @@ impl BridgeClient {
     // ------------------------------------------------------------------------
 
     /// Poll for an incoming callback event (or drain queued ones).
+    /// A stashed out-of-order response does not end the wait: polling continues
+    /// until a callback arrives or the effective deadline expires.
     pub fn poll_callback_event(
         &mut self,
         timeout_ms: i32,
@@ -349,23 +374,43 @@ impl BridgeClient {
             return Ok(Some(event));
         }
 
-        if !self.poll_readable(self.effective_timeout_ms(timeout_ms))? {
-            return Ok(None);
-        }
+        let start = Instant::now();
+        loop {
+            let elapsed_ms: i64 = start
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(i32::MAX as i64);
+            let wait_ms = if timeout_ms < 0 {
+                match self.request_timeout {
+                    None => timeout_ms,
+                    Some(_) => {
+                        let cap = self.effective_timeout_ms(timeout_ms) as i64;
+                        (cap - elapsed_ms).clamp(0, i32::MAX as i64) as i32
+                    }
+                }
+            } else {
+                let remaining = (timeout_ms as i64 - elapsed_ms).clamp(0, i32::MAX as i64) as i32;
+                self.effective_timeout_ms(remaining)
+            };
+            if !self.poll_readable(wait_ms)? {
+                return Ok(None);
+            }
 
-        let n = self.recv_raw_packet()?;
-        let msg = IncomingMessage::decode_from(&self.rx_buf[..n]).map_err(ClientError::Proto)?;
+            let n = self.recv_raw_packet()?;
+            let msg =
+                IncomingMessage::decode_from(&self.rx_buf[..n]).map_err(ClientError::Proto)?;
 
-        match msg {
-            IncomingMessage::Callback(cb) => Ok(Some(cb.to_owned())),
-            IncomingMessage::Response(resp) => {
-                Self::stash_response(
-                    &mut self.pending_responses,
-                    resp.req_id,
-                    resp.status,
-                    resp.payload,
-                );
-                Ok(None)
+            match msg {
+                IncomingMessage::Callback(cb) => return Ok(Some(cb.to_owned())),
+                IncomingMessage::Response(resp) => {
+                    Self::stash_response(
+                        &mut self.pending_responses,
+                        resp.req_id,
+                        resp.status,
+                        resp.payload,
+                    );
+                }
             }
         }
     }
@@ -384,8 +429,7 @@ impl BridgeClient {
                     return Err(ClientError::Timeout);
                 }
                 let remaining = dl.saturating_duration_since(now);
-                let remaining_ms: i64 =
-                    remaining.as_millis().try_into().unwrap_or(i32::MAX as i64);
+                let remaining_ms: i64 = remaining.as_millis().try_into().unwrap_or(i32::MAX as i64);
                 let timeout_ms = remaining_ms.clamp(0, i32::MAX as i64) as i32;
                 if !self.poll_readable(timeout_ms)? {
                     return Err(ClientError::Timeout);
@@ -425,14 +469,7 @@ impl BridgeClient {
         args.push(ArgValue::Str(method_name));
         args.extend_from_slice(method_args);
 
-        let id = self.send_request(OP_INVOKE_STATIC_METHOD, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_INVOKE_STATIC_METHOD, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.to_owned())
     }
@@ -451,14 +488,7 @@ impl BridgeClient {
         args.push(ArgValue::Str(method_name));
         args.extend_from_slice(method_args);
 
-        let id = self.send_request(OP_INVOKE_SERVICE_METHOD, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_INVOKE_SERVICE_METHOD, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.to_owned())
     }
@@ -475,14 +505,7 @@ impl BridgeClient {
         args.push(ArgValue::Int(code));
         args.extend_from_slice(transact_args);
 
-        let id = self.send_request(OP_RAW_BINDER_TRANSACT, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_RAW_BINDER_TRANSACT, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.as_bytes().unwrap_or(&[]).to_vec())
     }
@@ -497,14 +520,7 @@ impl BridgeClient {
             ArgValue::Int(callback_id as i32),
             ArgValue::Str(interface_name),
         ];
-        let id = self.send_request(OP_REGISTER_CALLBACK_PROXY, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_REGISTER_CALLBACK_PROXY, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.as_callback_token().unwrap_or(callback_id))
     }
@@ -516,14 +532,7 @@ impl BridgeClient {
         descriptor: &str,
     ) -> Result<u32, ClientError> {
         let args = [ArgValue::Int(callback_id as i32), ArgValue::Str(descriptor)];
-        let id = self.send_request(OP_REGISTER_BINDER_CALLBACK, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_REGISTER_BINDER_CALLBACK, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.as_callback_token().unwrap_or(callback_id))
     }
@@ -531,14 +540,7 @@ impl BridgeClient {
     /// Releases a registered callback proxy or stub so it can be garbage-collected.
     pub fn unregister_callback(&mut self, callback_id: u32) -> Result<(), ClientError> {
         let args = [ArgValue::Int(callback_id as i32)];
-        let id = self.send_request(OP_UNREGISTER_CALLBACK, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_UNREGISTER_CALLBACK, &args)?;
         Ok(())
     }
 
@@ -554,14 +556,7 @@ impl BridgeClient {
         full_args.push(ArgValue::Int(method_or_code as i32));
         full_args.extend_from_slice(args);
 
-        let id = self.send_request(OP_TRIGGER_CALLBACK, &full_args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_TRIGGER_CALLBACK, &full_args)?;
         Ok(())
     }
 
@@ -574,14 +569,7 @@ impl BridgeClient {
         let mut args = Vec::with_capacity(1 + ctor_args.len());
         args.push(ArgValue::Str(class_name));
         args.extend_from_slice(ctor_args);
-        let id = self.send_request(OP_NEW_INSTANCE, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_NEW_INSTANCE, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.to_owned())
     }
@@ -597,14 +585,7 @@ impl BridgeClient {
         args.push(ArgValue::ObjectToken(object_token));
         args.push(ArgValue::Str(method_name));
         args.extend_from_slice(method_args);
-        let id = self.send_request(OP_INVOKE_INSTANCE_METHOD, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_INVOKE_INSTANCE_METHOD, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.to_owned())
     }
@@ -616,14 +597,7 @@ impl BridgeClient {
         field_name: &str,
     ) -> Result<ArgValueOwned, ClientError> {
         let args = [target, ArgValue::Str(field_name)];
-        let id = self.send_request(OP_GET_FIELD, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_GET_FIELD, &args)?;
         let val = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(val.to_owned())
     }
@@ -636,28 +610,14 @@ impl BridgeClient {
         value: ArgValue<'_>,
     ) -> Result<(), ClientError> {
         let args = [target, ArgValue::Str(field_name), value];
-        let id = self.send_request(OP_SET_FIELD, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_SET_FIELD, &args)?;
         Ok(())
     }
 
     /// Removes an ObjectToken from the server registry.
     pub fn release_object(&mut self, object_token: u32) -> Result<(), ClientError> {
         let args = [ArgValue::ObjectToken(object_token)];
-        let id = self.send_request(OP_RELEASE_OBJECT, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_RELEASE_OBJECT, &args)?;
         Ok(())
     }
 
@@ -666,14 +626,7 @@ impl BridgeClient {
     // ------------------------------------------------------------------------
 
     pub fn ping(&mut self) -> Result<String, ClientError> {
-        let id = self.send_request(OP_PING, &[])?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_PING, &[])?;
         Ok(resp
             .payload_as_str()
             .map_err(ClientError::Proto)?
@@ -690,14 +643,7 @@ impl BridgeClient {
         if let Some(d) = def {
             args.push(ArgValue::Str(d));
         }
-        let id = self.send_request(OP_GET_SYSTEM_PROPERTY, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_GET_SYSTEM_PROPERTY, &args)?;
         Ok(resp
             .payload_as_str()
             .map_err(ClientError::Proto)?
@@ -711,53 +657,25 @@ impl BridgeClient {
     ) -> Result<(), ClientError> {
         let uid = user_id.unwrap_or(0);
         let args = [ArgValue::Str(pkg), ArgValue::Int(uid)];
-        let id = self.send_request(OP_FORCE_STOP_PACKAGE, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_FORCE_STOP_PACKAGE, &args)?;
         Ok(())
     }
 
     pub fn set_process_limit(&mut self, max: i32) -> Result<(), ClientError> {
         let args = [ArgValue::Int(max)];
-        let id = self.send_request(OP_SET_PROCESS_LIMIT, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        self.call(OP_SET_PROCESS_LIMIT, &args)?;
         Ok(())
     }
 
     pub fn check_service(&mut self, service_name: &str) -> Result<bool, ClientError> {
         let args = [ArgValue::Str(service_name)];
-        let id = self.send_request(OP_CHECK_SERVICE, &args)?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(OP_CHECK_SERVICE, &args)?;
         let text = resp.payload_as_str().map_err(ClientError::Proto)?;
         Ok(text == "EXISTS")
     }
 
     pub fn echo(&mut self, val: &ArgValue<'_>) -> Result<ArgValueOwned, ClientError> {
-        let id = self.send_request(bridge_proto::OP_ECHO, std::slice::from_ref(val))?;
-        let resp = self.recv_response(id)?;
-        if !resp.is_ok() {
-            return Err(ClientError::RemoteError {
-                status: resp.status,
-                message: resp.payload_as_str().unwrap_or("").to_string(),
-            });
-        }
+        let resp = self.call(bridge_proto::OP_ECHO, std::slice::from_ref(val))?;
         let res = resp.payload_as_arg_value().map_err(ClientError::Proto)?;
         Ok(res.to_owned())
     }
