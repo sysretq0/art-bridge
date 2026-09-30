@@ -81,7 +81,7 @@ impl BridgeClient {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 abstract_name.as_ptr(),
-                addr.sun_path.as_mut_ptr().add(1),
+                addr.sun_path.as_mut_ptr().cast::<u8>().add(1),
                 abstract_name.len(),
             );
         }

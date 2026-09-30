@@ -47,7 +47,7 @@ impl MockServer {
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     name_clone.as_ptr(),
-                    addr.sun_path.as_mut_ptr().add(1),
+                    addr.sun_path.as_mut_ptr().cast::<u8>().add(1),
                     name_clone.len(),
                 );
             }
@@ -595,7 +595,7 @@ fn test_request_timeout_expires() {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 server_name.as_ptr(),
-                addr.sun_path.as_mut_ptr().add(1),
+                addr.sun_path.as_mut_ptr().cast::<u8>().add(1),
                 server_name.len(),
             );
         }
